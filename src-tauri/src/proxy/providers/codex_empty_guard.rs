@@ -9,7 +9,6 @@ use futures::stream::{Stream, StreamExt};
 use serde_json::Value;
 use crate::proxy::sse::SseBuffer;
 
-#[derive(Debug)]
 pub(crate) enum StreamContentCheck {
     /// 检测到了实质性文本/工具输出，包含已缓冲的首部字节和剩余流
     HasContent {
@@ -22,6 +21,22 @@ pub(crate) enum StreamContentCheck {
     Other {
         buffered: Vec<Bytes>,
     },
+}
+
+impl std::fmt::Debug for StreamContentCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HasContent { buffered, .. } => f
+                .debug_struct("HasContent")
+                .field("buffered_chunks", &buffered.len())
+                .finish(),
+            Self::EmptyReply => write!(f, "EmptyReply"),
+            Self::Other { buffered } => f
+                .debug_struct("Other")
+                .field("buffered_chunks", &buffered.len())
+                .finish(),
+        }
+    }
 }
 
 /// 检查流的前段是否产生了实质内容
