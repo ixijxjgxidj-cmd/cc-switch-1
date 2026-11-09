@@ -1145,26 +1145,67 @@ async fn handle_responses_for_app(
     let namespace_restore_map = transform_codex_responses_namespace::namespace_restore_map(&body);
 
     let forwarder = ctx.create_forwarder(&state);
-    let mut result = match forwarder
-        .forward_with_retry(
-            &app_type,
-            method,
-            &endpoint,
-            &body,
-            headers,
-            extensions,
-            ctx.get_providers(),
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(mut err) => {
-            if let Some(provider) = err.provider.take() {
-                ctx.provider = provider;
+    let mut empty_retry_count = 0;
+
+    let mut result = loop {
+        let headers_clone = headers.clone();
+        let extensions_clone = extensions.clone();
+        let mut fwd_result = match forwarder
+            .forward_with_retry(
+                &app_type,
+                method.clone(),
+                &endpoint,
+                &body,
+                headers_clone,
+                extensions_clone,
+                ctx.get_providers(),
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(mut err) => {
+                if let Some(provider) = err.provider.take() {
+                    ctx.provider = provider;
+                }
+                ctx.outbound_model = err.outbound_model.take();
+                log_forward_error(&state, &ctx, is_stream, &err.error).await;
+                return build_codex_proxy_error_response(&ctx, &endpoint, &err.error, is_stream);
             }
-            ctx.outbound_model = err.outbound_model.take();
-            log_forward_error(&state, &ctx, is_stream, &err.error).await;
-            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error, is_stream);
+        };
+
+        // 仅对 Codex 流式响应执行空回复守卫（非流式或其它客户端直接透传）
+        if app_type != AppType::Codex || !is_stream {
+            break fwd_result;
+        }
+
+        // 检查流式响应前段是否产生了实质内容
+        let status = fwd_result.response.status();
+        let res_headers = fwd_result.response.headers().clone();
+        let stream = Box::pin(fwd_result.response.bytes_stream());
+
+        match super::providers::codex_empty_guard::check_stream_first_content(stream).await {
+            super::providers::codex_empty_guard::StreamContentCheck::HasContent {
+                buffered,
+                stream,
+            } => {
+                let chained = futures::stream::iter(buffered.into_iter().map(Ok)).chain(stream);
+                fwd_result.response = super::hyper_client::ProxyResponse::streamed(status, res_headers, chained);
+                break fwd_result;
+            }
+            super::providers::codex_empty_guard::StreamContentCheck::EmptyReply => {
+                empty_retry_count += 1;
+                log::warn!(
+                    "[{app_type_str}] 上游返回 0 Token 空回复 (completed 但 output 为空且 0 Token 消耗)。\
+                     自动就地重新请求上游（第 {empty_retry_count} 次），保持客户端连接，持续等待真实输出..."
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                continue;
+            }
+            super::providers::codex_empty_guard::StreamContentCheck::Other { buffered } => {
+                let stream = futures::stream::iter(buffered.into_iter().map(Ok));
+                fwd_result.response = super::hyper_client::ProxyResponse::streamed(status, res_headers, stream);
+                break fwd_result;
+            }
         }
     };
     drop(body);
@@ -1502,26 +1543,67 @@ async fn handle_responses_compact_for_app(
     let namespace_restore_map = transform_codex_responses_namespace::namespace_restore_map(&body);
 
     let forwarder = ctx.create_forwarder(&state);
-    let mut result = match forwarder
-        .forward_with_retry(
-            &app_type,
-            method,
-            &endpoint,
-            &body,
-            headers,
-            extensions,
-            ctx.get_providers(),
-        )
-        .await
-    {
-        Ok(result) => result,
-        Err(mut err) => {
-            if let Some(provider) = err.provider.take() {
-                ctx.provider = provider;
+    let mut empty_retry_count = 0;
+
+    let mut result = loop {
+        let headers_clone = headers.clone();
+        let extensions_clone = extensions.clone();
+        let mut fwd_result = match forwarder
+            .forward_with_retry(
+                &app_type,
+                method.clone(),
+                &endpoint,
+                &body,
+                headers_clone,
+                extensions_clone,
+                ctx.get_providers(),
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(mut err) => {
+                if let Some(provider) = err.provider.take() {
+                    ctx.provider = provider;
+                }
+                ctx.outbound_model = err.outbound_model.take();
+                log_forward_error(&state, &ctx, is_stream, &err.error).await;
+                return build_codex_proxy_error_response(&ctx, &endpoint, &err.error, is_stream);
             }
-            ctx.outbound_model = err.outbound_model.take();
-            log_forward_error(&state, &ctx, is_stream, &err.error).await;
-            return build_codex_proxy_error_response(&ctx, &endpoint, &err.error, is_stream);
+        };
+
+        // 仅对 Codex 流式响应执行空回复守卫（非流式或其它客户端直接透传）
+        if app_type != AppType::Codex || !is_stream {
+            break fwd_result;
+        }
+
+        // 检查流式响应前段是否产生了实质内容
+        let status = fwd_result.response.status();
+        let res_headers = fwd_result.response.headers().clone();
+        let stream = Box::pin(fwd_result.response.bytes_stream());
+
+        match super::providers::codex_empty_guard::check_stream_first_content(stream).await {
+            super::providers::codex_empty_guard::StreamContentCheck::HasContent {
+                buffered,
+                stream,
+            } => {
+                let chained = futures::stream::iter(buffered.into_iter().map(Ok)).chain(stream);
+                fwd_result.response = super::hyper_client::ProxyResponse::streamed(status, res_headers, chained);
+                break fwd_result;
+            }
+            super::providers::codex_empty_guard::StreamContentCheck::EmptyReply => {
+                empty_retry_count += 1;
+                log::warn!(
+                    "[{app_type_str}] 上游返回 0 Token 空回复 (completed 但 output 为空且 0 Token 消耗)。\
+                     自动就地重新请求上游（第 {empty_retry_count} 次），保持客户端连接，持续等待真实输出..."
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                continue;
+            }
+            super::providers::codex_empty_guard::StreamContentCheck::Other { buffered } => {
+                let stream = futures::stream::iter(buffered.into_iter().map(Ok));
+                fwd_result.response = super::hyper_client::ProxyResponse::streamed(status, res_headers, stream);
+                break fwd_result;
+            }
         }
     };
     drop(body);
