@@ -48,13 +48,10 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build frontend
-        run: pnpm build:renderer
-
-      - name: Build backend binary with Cargo
+      - name: Build production app with Tauri CLI
         shell: pwsh
         run: |
-          cargo build --release --manifest-path src-tauri/Cargo.toml
+          pnpm tauri build --no-bundle
 
       - name: Prepare artifact
         shell: pwsh
